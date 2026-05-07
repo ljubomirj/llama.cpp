@@ -369,7 +369,7 @@ llama_model_bailing_hybrid::graph::graph(const llama_model & model, const llm_gr
 
             const float n_h = (float)n_head;
             const float rate = powf(2.0f, -(log2f(n_h) - 3.0f));
-            const float denom = std::max(1.0f, (float)(n_transformer_layers - 1));
+            const float denom = std::max(1.0f, (float)(n_layer - 1));
             const float layer_factor = 1.0f - (float)il / denom + 1e-5f;
 
             ggml_tensor * h_idx = ggml_arange(ctx0, 1.0f, (float)(n_head + 1), 1.0f);

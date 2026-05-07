@@ -17,3 +17,16 @@
 - [ ] Avoid duplicate huge Metal mapping for forced GPU-offloaded MTP head, or make partial MTP tensor loading/offload truly sparse.
 - [ ] Replace temporary raw tensor getters with the upstream internal/pre-norm embeddings API when available.
 - [ ] Integrate MTP hidden-state stream with prompt-cache restore once the server cache can persist computed pre-norm embeddings.
+
+## Research Backlog
+
+- [ ] Pin down the exact Ling MTP math from the original model implementation or converter metadata.
+- [ ] Trace `-mtp` vs `-r2` on the same prompt and log where the outputs first diverge.
+- [ ] Re-read the latest `mtp-clean` PR discussion for architecture intent, rollback semantics, and loader behavior.
+- [ ] Inspect recurrent rollback / `seq_rm` behavior for hybrid trunk verification and MTP draft acceptance.
+- [ ] Map prompt-cache restore requirements for pre-norm hidden rows and MTP verification state.
+- [ ] Research backend and memory sharing options for trunk + MTP sibling contexts, especially Metal and HIP.
+- [ ] Compare MLX, vLLM, Ollama, and MTPLX MTP implementations for model math and cache handling ideas.
+- [ ] Verify whether MTP should be disabled or guarded for multimodal prompts until positions and hidden-state flow are explicit.
+- [ ] Confirm how tensor split and layer split should place the MTP sibling without forcing it onto the last GPU.
+- [ ] Define how server memory estimation should account for MTP buffers, rollback slots, and future hidden-state cache storage.
