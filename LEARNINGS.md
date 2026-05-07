@@ -1,0 +1,4 @@
+2026-05-07: BAILING_HYBRID_MTP must use the plain KV cache path, not hybrid memory; classifying it as hybrid gives the MTP graph a null KV cache context.
+2026-05-07: Bailing Hybrid's output-row gather in the last layer drops non-output hidden states before final FFN; MTP needs a full pre-norm hidden stream, then logits can gather output rows afterward.
+2026-05-07: Loading the MTP head with default/target GPU offload maps a second huge Metal buffer from the same GGUF and can OOM on M2 Max; default the MTP draft head to CPU unless draft NGL is explicitly forced.
+2026-05-07: PR #22673 mtp-clean is still hook-based but its latest commits are useful: partial sibling-model loading, target-only recurrent rollback slots for MTP, speculative-before-target teardown, and concrete backend/multimodal failure reports.

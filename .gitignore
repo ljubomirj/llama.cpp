@@ -159,3 +159,10 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+.omx
+
+.viminfo
+*~
+.*.s[wv]?
+

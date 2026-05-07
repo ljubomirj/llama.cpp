@@ -18,6 +18,7 @@ for the Ling-2.6-flash model in llama.cpp.
 | [09-mlx-lm-mtp.md](09-mlx-lm-mtp.md) | mlx-lm PR #990: Qwen3.5 native MTP, SSM snapshot/rollback, n_confirmed pattern |
 | [10-mlx-vlm-gemma4-mtp.md](10-mlx-vlm-gemma4-mtp.md) | mlx-vlm PR #1112: Gemma 4 MTP drafter, shared KV, centroids masking, spec cache wrapper |
 | [11-cudnn-frontend-kernels.md](11-cudnn-frontend-kernels.md) | NVIDIA cuDNN Frontend: fused kernel patterns (Grouped GEMM+GLU, SDPA, NSA) for Metal ref |
+| [12-pr-22673-mtp-clean-latest.md](12-pr-22673-mtp-clean-latest.md) | Latest PR #22673 / mtp-clean lessons: hook design status, partial MTP loader, rollback slots, backend/multimodal risks |
 
 ## Quick Start
 
@@ -39,6 +40,14 @@ cmake -B build -DLLAMA_METAL=ON -DLLAMA_ACCELERATE=ON && cmake --build build -j$
 ```
 
 ## TL;DR of Bugs
+
+**2026-05-07 PR #22673 update:** latest `mtp-clean` still uses the hook-based
+`llama_set_mtp()` design, but adds useful fixes: partial sibling-model loading,
+target-only recurrent rollback slots for MTP, double-free lifetime ordering, and
+Qwen dense/MoE MTP heads. New PR reports confirm the main integration risks for
+Ling r2: duplicate backend/GPU memory allocation, tensor split placement, missing
+MTP memory estimation, and multimodal prompt crashes. See
+[12-pr-22673-mtp-clean-latest.md](12-pr-22673-mtp-clean-latest.md).
 
 1. **Hook position gap** (FIXED) — streaming hook didn't save pending state on early return
 2. **Draft position mismatch** (FIXED) — MTP fell behind trunk by 1 position. Fixed by GLA slot fix (`slot = n_tokens - t`) + n_max clamping. Acceptance now ~40%.
