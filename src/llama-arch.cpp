@@ -859,7 +859,6 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_BAILING_HYBRID:
-        case LLM_ARCH_BAILING_HYBRID_MTP:
             return true;
         default:
             return false;
@@ -883,7 +882,6 @@ bool llm_arch_supports_recurrent_partial_rollback(const llm_arch & arch) {
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_BAILING_HYBRID:
-        case LLM_ARCH_BAILING_HYBRID_MTP:
             return true;
         default:
             return false;

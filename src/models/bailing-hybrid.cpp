@@ -226,7 +226,8 @@ llama_model_bailing_hybrid::graph::graph(const llama_model & model, const llm_gr
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
+    const int  n_transformer_layers = n_layer - hparams.nextn_predict_layers;
+    const bool need_mtp_hidden      = hparams.nextn_predict_layers > 0;
     for (int il = 0; il < n_transformer_layers; ++il) {
         ggml_tensor * inpSA = inpL;
 
@@ -434,7 +435,7 @@ llama_model_bailing_hybrid::graph::graph(const llama_model & model, const llm_gr
             cb(cur, "attn_out", il);
         }
 
-        if (il == n_transformer_layers - 1 && inp_out_ids) {
+        if (il == n_transformer_layers - 1 && inp_out_ids && !need_mtp_hidden) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -484,12 +485,21 @@ llama_model_bailing_hybrid::graph::graph(const llama_model & model, const llm_gr
         cur = build_cvec(cur, il);
         cb(cur, "l_out", il);
 
+        if (il == n_transformer_layers - 1 && need_mtp_hidden) {
+            cb(cur, "h_pre_norm", -1);
+            res->t_h_pre_norm = cur;
+
+            if (inp_out_ids) {
+                cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+            }
+        }
+
         inpL = cur;
     }
 
     cur = inpL;
 
-    if (hparams.nextn_predict_layers > 0) {
+    if (need_mtp_hidden && res->t_h_pre_norm == nullptr) {
         cb(cur, "h_pre_norm", -1);
         res->t_h_pre_norm = cur;
     }
@@ -624,8 +634,6 @@ std::unique_ptr<llm_graph_context> llama_model_bailing_hybrid_mtp::build_arch_gr
 llama_model_bailing_hybrid_mtp::graph::graph(const llama_model & model, const llm_graph_params & params)
     : llm_graph_context(params) {
 
-    fprintf(stderr, "MTP graph: start\n");
-
     GGML_ASSERT(hparams.nextn_predict_layers > 0 && "BAILING_HYBRID_MTP requires nextn_predict_layers > 0");
     GGML_ASSERT(hparams.nextn_predict_layers == 1 && "BAILING_HYBRID_MTP currently only supports a single MTP block");
 
@@ -645,9 +653,6 @@ llama_model_bailing_hybrid_mtp::graph::graph(const llama_model & model, const ll
     const int il = (int) hparams.n_layer - (int) hparams.nextn_predict_layers;
     const auto & layer = model.layers[il];
 
-    fprintf(stderr, "MTP graph: il=%d, eh_proj=%p, tok_embd=%p, is_mla=%d\n",
-            il, (void*)layer.nextn.eh_proj, (void*)model.tok_embd, (int)is_mla);
-
     GGML_ASSERT(layer.nextn.eh_proj && "MTP block missing nextn.eh_proj");
     GGML_ASSERT(layer.nextn.enorm   && "MTP block missing nextn.enorm");
     GGML_ASSERT(layer.nextn.hnorm   && "MTP block missing nextn.hnorm");
@@ -663,8 +668,6 @@ llama_model_bailing_hybrid_mtp::graph::graph(const llama_model & model, const ll
 
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
-    fprintf(stderr, "MTP graph: tok_embd_w=%p, n_tokens=%d\n", (void*)tok_embd_w, (int)n_tokens);
-
     ggml_tensor * h_input  = inp->embd;
     ggml_tensor * tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
     cb(tok_embd, "mtp_tok_embd", il);
@@ -672,34 +675,25 @@ llama_model_bailing_hybrid_mtp::graph::graph(const llama_model & model, const ll
     res->add_input(std::move(inp));
 
     ggml_tensor * inp_pos = build_inp_pos();
-    fprintf(stderr, "MTP graph: inp_pos done\n");
     auto * inp_attn_k  =  is_mla ? build_attn_inp_k()  : nullptr;
-    fprintf(stderr, "MTP graph: attn inputs done, inp_attn_k=%p\n", (void*)inp_attn_k);
     auto * inp_attn_kv = !is_mla ? build_attn_inp_kv() : nullptr;
 
-    fprintf(stderr, "MTP graph: building h_norm\n");
     ggml_tensor * h_norm = build_norm(h_input, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
-    fprintf(stderr, "MTP graph: h_norm done\n");
     cb(h_norm, "mtp_hnorm", il);
 
-    fprintf(stderr, "MTP graph: building e_norm\n");
     ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
-    fprintf(stderr, "MTP graph: e_norm done\n");
     cb(e_norm, "mtp_enorm", il);
 
     ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
     cb(concat, "mtp_concat", il);
-    fprintf(stderr, "MTP graph: concat done\n");
 
     ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat);
     cb(cur, "mtp_eh_proj", il);
-    fprintf(stderr, "MTP graph: eh_proj done\n");
 
     ggml_tensor * inpSA = cur;
 
     cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
     cb(cur, "mtp_attn_norm", il);
-    fprintf(stderr, "MTP graph: attn_norm done\n");
 
     ggml_tensor * q = NULL;
     if (layer.wq_a && layer.wq_b) {
@@ -773,11 +767,9 @@ llama_model_bailing_hybrid_mtp::graph::graph(const llama_model & model, const ll
         ggml_tensor * Vcur = kv_cmpr;
         cb(Vcur, "mtp_Vcur", il);
 
-        fprintf(stderr, "MTP graph: build_attn MLA start\n");
         cur = build_attn(inp_attn_k,
                 layer.wo, nullptr, nullptr,
                 Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, kq_scale, il);
-        fprintf(stderr, "MTP graph: build_attn MLA done\n");
         cb(cur, "mtp_attn_out", il);
     } else {
         ggml_tensor * kv = ggml_mul_mat(ctx0, layer.wkv_b, kv_cmpr);

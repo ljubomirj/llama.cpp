@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <map>
 #include <cinttypes>
+#include <vector>
 
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
 #define SPEC_VOCAB_CHECK_START_TOKEN_ID 5
@@ -145,6 +146,11 @@ struct common_speculative_state {
     virtual ~common_speculative_state() = default;
 
     virtual void begin(const llama_tokens & prompt) = 0;
+
+    virtual void on_target_decode(const llama_batch & batch, llama_seq_id seq_id) {
+        GGML_UNUSED(batch);
+        GGML_UNUSED(seq_id);
+    }
 
     virtual void draft(
             const common_params_speculative & params,
@@ -643,9 +649,13 @@ struct common_speculative_state_mtp : public common_speculative_state {
     llama_context * ctx_mtp = nullptr;
 
     llama_batch       batch;
+    llama_batch       stream_batch;
     common_sampler  * smpl = nullptr;
     int32_t           n_embd = 0;
     int32_t           n_mtp_heads = 1;
+    std::vector<float> pending_h;
+    llama_pos          pending_pos = -1;
+    bool               disabled = false;
 
     uint16_t last_n_drafted  = 0;
     int32_t  last_n_accepted = -1;
@@ -683,11 +693,15 @@ struct common_speculative_state_mtp : public common_speculative_state {
         batch.n_seq_id[0]  = 1;
         batch.seq_id[0][0] = 0;
         batch.logits[0]    = 1;
+
+        stream_batch = llama_batch_init((int32_t) llama_n_ubatch(ctx_tgt), n_embd, 1);
+        stream_batch.token = (llama_token *) malloc(sizeof(llama_token) * llama_n_ubatch(ctx_tgt));
+        pending_h.assign(n_embd, 0.0f);
     }
 
     ~common_speculative_state_mtp() override {
-        llama_set_mtp(ctx_tgt, nullptr);
         llama_batch_free(batch);
+        llama_batch_free(stream_batch);
         common_sampler_free(smpl);
         if (ctx_mtp) {
             llama_free(ctx_mtp);
@@ -697,6 +711,7 @@ struct common_speculative_state_mtp : public common_speculative_state {
     void begin(const llama_tokens & prompt) override {
         last_n_accepted = -1;
         last_n_drafted  = 0;
+        disabled        = false;
 
         const int32_t N = (int32_t) prompt.size();
         if (N <= 0) {
@@ -709,12 +724,136 @@ struct common_speculative_state_mtp : public common_speculative_state {
         }
     }
 
+    void on_target_decode(const llama_batch & target_batch, llama_seq_id seq_id) override {
+        if (disabled) {
+            return;
+        }
+        if (target_batch.n_tokens == 0 || target_batch.token == nullptr || target_batch.pos == nullptr) {
+            return;
+        }
+
+        ggml_tensor * t = llama_context_get_t_h_pre_norm(ctx_tgt);
+        if (t == nullptr || t->ne[1] != (int64_t) target_batch.n_tokens) {
+            return;
+        }
+        GGML_ASSERT(t->ne[0] == n_embd);
+
+        std::vector<int32_t> rows;
+        rows.reserve(target_batch.n_tokens);
+        for (int32_t i = 0; i < target_batch.n_tokens; ++i) {
+            const int32_t n_seq_id = target_batch.n_seq_id ? target_batch.n_seq_id[i] : 1;
+            for (int32_t s = 0; s < n_seq_id; ++s) {
+                const llama_seq_id cur_seq_id = target_batch.seq_id ? target_batch.seq_id[i][s] : 0;
+                if (cur_seq_id == seq_id) {
+                    rows.push_back(i);
+                    break;
+                }
+            }
+        }
+        if (rows.empty()) {
+            return;
+        }
+        if (rows.size() > (size_t) llama_n_ubatch(ctx_tgt)) {
+            LOG_WRN("%s: target decode batch has %zu selected rows, but MTP stream batch capacity is %u; skipping\n",
+                    __func__, rows.size(), llama_n_ubatch(ctx_tgt));
+            return;
+        }
+
+        const int       n_rows    = (int) rows.size();
+        const llama_pos pos_start = target_batch.pos[rows[0]];
+        const llama_pos pos_max_mtp = llama_memory_seq_pos_max(llama_get_memory(ctx_mtp), 0);
+
+        bool force_all_rows = false;
+
+        if (pos_start <= pos_max_mtp) {
+            llama_memory_seq_rm(llama_get_memory(ctx_mtp), 0, pos_start, -1);
+            pending_pos = -1;
+            force_all_rows = true;
+        }
+
+        const bool pending_continues = pending_pos >= 0 && pending_pos + 1 == pos_start;
+        if (pending_pos >= 0 && !pending_continues) {
+            pending_pos = -1;
+        }
+
+        llama_synchronize(ctx_tgt);
+
+        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+        const int    n_out     = force_all_rows
+            ? n_rows
+            : ((pending_continues ? 1 : 0) + (n_rows - 1));
+
+        if (n_out > 0) {
+            int out_idx = 0;
+            if (force_all_rows) {
+                for (int k = 0; k < n_rows; ++k) {
+                    const int32_t row = rows[k];
+                    ggml_backend_tensor_get(t,
+                        stream_batch.embd + (size_t) out_idx * n_embd,
+                        (size_t) row * row_bytes,
+                        row_bytes);
+                    stream_batch.token[out_idx]     = target_batch.token[row];
+                    stream_batch.pos[out_idx]       = target_batch.pos[row];
+                    stream_batch.n_seq_id[out_idx]  = 1;
+                    stream_batch.seq_id[out_idx][0] = 0;
+                    stream_batch.logits[out_idx]    = 0;
+                    ++out_idx;
+                }
+            } else {
+                if (pending_continues) {
+                    std::memcpy(stream_batch.embd + (size_t) out_idx * n_embd,
+                                pending_h.data(), row_bytes);
+                    const int32_t row = rows[0];
+                    stream_batch.token[out_idx]     = target_batch.token[row];
+                    stream_batch.pos[out_idx]       = pos_start;
+                    stream_batch.n_seq_id[out_idx]  = 1;
+                    stream_batch.seq_id[out_idx][0] = 0;
+                    stream_batch.logits[out_idx]    = 0;
+                    ++out_idx;
+                }
+                for (int k = 0; k + 1 < n_rows; ++k) {
+                    const int32_t row_h = rows[k];
+                    const int32_t row_x = rows[k + 1];
+                    ggml_backend_tensor_get(t,
+                        stream_batch.embd + (size_t) out_idx * n_embd,
+                        (size_t) row_h * row_bytes,
+                        row_bytes);
+                    stream_batch.token[out_idx]     = target_batch.token[row_x];
+                    stream_batch.pos[out_idx]       = target_batch.pos[row_x];
+                    stream_batch.n_seq_id[out_idx]  = 1;
+                    stream_batch.seq_id[out_idx][0] = 0;
+                    stream_batch.logits[out_idx]    = 0;
+                    ++out_idx;
+                }
+            }
+            GGML_ASSERT(out_idx == n_out);
+            stream_batch.n_tokens = n_out;
+
+            const int32_t rc_dec = llama_decode(ctx_mtp, stream_batch);
+            if (rc_dec != 0) {
+                LOG_ERR("%s: llama_decode(ctx_mtp) failed rc=%d (pos=%d, n=%d)\n",
+                        __func__, (int) rc_dec, (int) pos_start, n_out);
+                disabled = true;
+                return;
+            }
+        }
+
+        const int32_t row_last = rows.back();
+        ggml_backend_tensor_get(t, pending_h.data(), (size_t) row_last * row_bytes, row_bytes);
+        pending_pos = target_batch.pos[row_last];
+    }
+
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
             llama_token id_last,
             llama_tokens & draft_tokens) override {
         draft_tokens.clear();
+        GGML_UNUSED(prompt_tgt);
+
+        if (disabled) {
+            return;
+        }
 
         if (last_n_drafted > 0) {
             const int32_t n_to_drop = (int32_t) last_n_drafted - 1;
@@ -763,7 +902,9 @@ struct common_speculative_state_mtp : public common_speculative_state {
 
             const int32_t dec_rc = llama_decode(ctx_mtp, batch);
             if (dec_rc != 0) {
-                LOG_DBG("%s: llama_decode rc=%d at k=%d; stopping chain\n", __func__, dec_rc, k);
+                LOG_ERR("%s: llama_decode(ctx_mtp) failed rc=%d at k=%d; disabling MTP for this request\n",
+                        __func__, dec_rc, k);
+                disabled = true;
                 return;
             }
 
@@ -1271,7 +1412,6 @@ common_speculative * common_speculative_init(
                     LOG_ERR("%s", "failed to create MTP context\n");
                     return nullptr;
                 }
-                llama_set_mtp(ctx_tgt, ctx_mtp);
                 impls.push_back(std::make_unique<common_speculative_state_mtp>(
                     config.type, ctx_tgt, ctx_mtp));
                 break;
@@ -1311,6 +1451,16 @@ void common_speculative_begin(common_speculative * spec, const llama_tokens & pr
         common_time_meas tm(impl->t_begin_us, !impl->gen_perf);
         impl->begin(prompt);
         impl->n_call_begin++;
+    }
+}
+
+void common_speculative_on_decode(common_speculative * spec, const llama_batch & batch, llama_seq_id seq_id) {
+    if (spec == nullptr) {
+        return;
+    }
+
+    for (auto & impl : spec->impls) {
+        impl->on_target_decode(batch, seq_id);
     }
 }
 

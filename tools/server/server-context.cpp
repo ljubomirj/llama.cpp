@@ -831,9 +831,15 @@ private:
 
             auto mparams_mtp = common_model_params_to_llama(params_base);
             mparams_mtp.override_arch = mtp_arch;
+            mparams_mtp.n_gpu_layers = 0;
 
-            if (params_base.speculative.draft.n_gpu_layers >= 0) {
+            if (params_base.speculative.draft.n_gpu_layers != -1) {
                 mparams_mtp.n_gpu_layers = params_base.speculative.draft.n_gpu_layers;
+            } else {
+                SRV_WRN("%s\n", "MTP draft head defaults to CPU; use --spec-draft-ngl to offload it");
+            }
+            if (!params_base.speculative.draft.devices.empty()) {
+                mparams_mtp.devices = params_base.speculative.draft.devices.data();
             }
 
             model_mtp.reset(llama_model_load_from_file(params_base.model.path.c_str(), mparams_mtp));
@@ -2856,7 +2862,10 @@ private:
 
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i = i_next) {
-            const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
+            const int32_t n_decode_batch = params_base.speculative.type == COMMON_SPECULATIVE_TYPE_MTP
+                ? std::min(n_batch, (int32_t) llama_n_ubatch(ctx))
+                : n_batch;
+            const int32_t n_tokens = std::min(n_decode_batch, batch.n_tokens - i);
 
             llama_batch batch_view = {
                 n_tokens,
@@ -2923,6 +2932,14 @@ private:
 
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
+
+            if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_MTP) {
+                for (auto & slot : slots) {
+                    if (slot.can_speculate()) {
+                        common_speculative_on_decode(slot.spec.get(), batch_view, slot.id);
+                    }
+                }
+            }
 
             // on successful decode, restore the original batch size
             n_batch = llama_n_batch(ctx);

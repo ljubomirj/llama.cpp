@@ -183,14 +183,6 @@ struct llama_context {
     ggml_tensor * get_t_h_pre_norm() const;
     ggml_tensor * get_t_mtp_out()    const;
 
-    void set_mtp(llama_context * ctx_mtp_in);
-
-    void handle_mtp_for_ubatch(
-            int32_t                n_tokens,
-            const llama_token    * tokens,
-            const llama_pos      * positions,
-            struct ggml_tensor   * t_h_pre_norm);
-
     //
     // training
     //
@@ -274,15 +266,6 @@ private:
     const llama_model & model;
 
     llama_cparams cparams;
-
-    struct mtp_state {
-        llama_context * ctx_mtp     = nullptr;
-        llama_batch     hook_batch  = {};
-        std::vector<float> pending_h;
-        llama_pos       pending_pos = -1;
-    };
-
-    mtp_state mtp;
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;

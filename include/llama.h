@@ -975,10 +975,6 @@ extern "C" {
     LLAMA_API struct ggml_tensor * llama_context_get_t_h_pre_norm(struct llama_context * ctx);
     LLAMA_API struct ggml_tensor * llama_context_get_t_mtp_out   (struct llama_context * ctx);
 
-    LLAMA_API void llama_set_mtp(
-            struct llama_context * ctx_target,
-            struct llama_context * ctx_mtp);
-
     // Wait until all computations are finished
     // This is automatically done when using one of the functions below to obtain the computation results
     // and is not necessary to call it explicitly in most cases
