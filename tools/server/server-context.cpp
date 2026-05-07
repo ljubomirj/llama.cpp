@@ -674,6 +674,7 @@ private:
     llama_batch batch {};
 
     llama_model_ptr model_dft;
+    llama_model_ptr model_mtp;
 
     bool add_bos_token = true;
 
@@ -807,6 +808,74 @@ private:
 
             params_base.speculative.draft.model = model_dft.get();
             params_base.speculative.draft.cparams = common_context_params_to_llama(params_dft);
+        }
+
+        if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_MTP) {
+            char trunk_arch[64] = {0};
+            llama_model_meta_val_str(model, "general.architecture", trunk_arch, sizeof(trunk_arch));
+
+            const char * mtp_arch = nullptr;
+            if (std::string(trunk_arch) == "bailing_hybrid") {
+                mtp_arch = "bailing_hybrid_mtp";
+            } else if (std::string(trunk_arch) == "qwen35moe") {
+                mtp_arch = "qwen35moe_mtp";
+            } else if (std::string(trunk_arch) == "qwen35") {
+                mtp_arch = "qwen35_mtp";
+            } else {
+                SRV_ERR("MTP not supported for trunk architecture '%s'\n", trunk_arch);
+                return false;
+            }
+
+            SRV_INF("loading MTP head from '%s' (override_arch=%s)\n",
+                    params_base.model.path.c_str(), mtp_arch);
+
+            auto mparams_mtp = common_model_params_to_llama(params_base);
+            mparams_mtp.override_arch = mtp_arch;
+
+            if (params_base.speculative.draft.n_gpu_layers >= 0) {
+                mparams_mtp.n_gpu_layers = params_base.speculative.draft.n_gpu_layers;
+            }
+
+            model_mtp.reset(llama_model_load_from_file(params_base.model.path.c_str(), mparams_mtp));
+            if (model_mtp == nullptr) {
+                SRV_ERR("failed to load MTP head from '%s'\n", params_base.model.path.c_str());
+                return false;
+            }
+
+            {
+                char key[128];
+                snprintf(key, sizeof(key), "%s.nextn_predict_layers", trunk_arch);
+                char buf[32] = {0};
+                if (llama_model_meta_val_str(model, key, buf, sizeof(buf)) > 0) {
+                    const int32_t n_mtp_heads = atoi(buf);
+                    if (n_mtp_heads > 0 && params_base.speculative.draft.n_max > n_mtp_heads) {
+                        SRV_WRN("clamping --spec-draft-n-max from %d to %d (model has %d MTP head(s))\n",
+                                params_base.speculative.draft.n_max, n_mtp_heads, n_mtp_heads);
+                        params_base.speculative.draft.n_max = n_mtp_heads;
+                    }
+                }
+            }
+
+            if (params_base.n_parallel > 1) {
+                SRV_ERR("MTP currently supports only n_parallel=1; got %d\n", params_base.n_parallel);
+                return false;
+            }
+
+            auto cparams_mtp = common_context_params_to_llama(params_base);
+            cparams_mtp.n_ctx     = llama_n_ctx_seq(ctx);
+            cparams_mtp.n_seq_max = 1;
+
+            params_base.speculative.mtp.model   = model_mtp.get();
+            params_base.speculative.mtp.cparams = cparams_mtp;
+
+            if (params_base.n_cache_reuse) {
+                params_base.n_cache_reuse = 0;
+                SRV_WRN("%s\n", "cache_reuse is not supported with MTP, it will be disabled");
+            }
+            if (params_base.ctx_shift) {
+                params_base.ctx_shift = false;
+                SRV_WRN("%s\n", "ctx_shift is not supported with MTP, it will be disabled");
+            }
         }
 
         std::string & mmproj_path = params_base.mmproj.path;

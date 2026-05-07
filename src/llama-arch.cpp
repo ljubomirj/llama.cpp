@@ -103,6 +103,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_BAILINGMOE,       "bailingmoe"       },
     { LLM_ARCH_BAILINGMOE2,      "bailingmoe2"      },
     { LLM_ARCH_BAILING_HYBRID,    "bailing_hybrid"    },
+    { LLM_ARCH_BAILING_HYBRID_MTP, "bailing_hybrid_mtp" },
     { LLM_ARCH_DOTS1,            "dots1"            },
     { LLM_ARCH_ARCEE,            "arcee"            },
     { LLM_ARCH_AFMOE,            "afmoe"            },
@@ -757,14 +758,12 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_INDEXER_PROJ,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_INDEXER_ATTN_K,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_INDEXER_ATTN_Q_B,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
-    // NextN/MTP tensors are currently ignored (reserved for future MTP support)
-    // These tensors only exist in the last layer(s) and are treated as output tensors
-    {LLM_TENSOR_NEXTN_EH_PROJ,              {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL_MAT}},
-    {LLM_TENSOR_NEXTN_EMBED_TOKENS,         {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_GET_ROWS}},
-    {LLM_TENSOR_NEXTN_ENORM,                {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_GET_ROWS}},
-    {LLM_TENSOR_NEXTN_HNORM,                {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL}},
-    {LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,     {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL_MAT}},
-    {LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,     {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL}},
+    {LLM_TENSOR_NEXTN_EH_PROJ,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_NEXTN_EMBED_TOKENS,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_GET_ROWS}},
+    {LLM_TENSOR_NEXTN_ENORM,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_GET_ROWS}},
+    {LLM_TENSOR_NEXTN_HNORM,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     // Nemotron 3 Super
     {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_FFN_LATENT_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
@@ -860,6 +859,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_BAILING_HYBRID:
+        case LLM_ARCH_BAILING_HYBRID_MTP:
             return true;
         default:
             return false;
@@ -883,6 +883,7 @@ bool llm_arch_supports_recurrent_partial_rollback(const llm_arch & arch) {
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_BAILING_HYBRID:
+        case LLM_ARCH_BAILING_HYBRID_MTP:
             return true;
         default:
             return false;

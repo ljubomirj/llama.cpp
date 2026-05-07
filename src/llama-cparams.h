@@ -40,6 +40,8 @@ struct llama_cparams {
     bool kv_unified;
     bool pipeline_parallel;
 
+    uint32_t n_rs_seq; // number of recurrent-state snapshot slots per sequence (for speculative rollback)
+
     enum llama_pooling_type pooling_type;
 
     ggml_backend_sched_eval_callback cb_eval;
