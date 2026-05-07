@@ -1,0 +1,155 @@
+---
+tags:
+- gguf
+- llama.cpp
+- text-generation
+- moe
+- quantized
+- bailing
+license: apache-2.0
+language:
+- en
+- zh
+pipeline_tag: text-generation
+base_model: inclusionAI/Ling-2.6-flash
+base_model_relation: quantized
+---
+
+# Ling-2.6-flash GGUF
+
+Quantized GGUF of [inclusionAI/Ling-2.6-flash](https://huggingface.co/inclusionAI/Ling-2.6-flash) — a 104B parameter MoE model (7.4B active) with hybrid MLA/GLA architecture.
+
+## Files
+
+| File | Size | Format |
+|------|------|--------|
+| `Ling-2.6-flash-IQ4_NL-bailing_hybrid-20260505-LJ.gguf` | ~57 GB | IQ4_NL |
+
+## Running in llama.cpp
+
+**This model requires a custom llama.cpp branch with Bailing Hybrid architecture support:**
+
+*https://github.com/ljubomirj/llama.cpp/tree/LJ-Ling-2.6-flash-r2*
+
+While the mtp works (llama-server accepts '--spec-type mtp') atm it actually slows down the decode. So the speed test below are *without* mtp in. IDK why mtp does not help. (can think o reasonsf: the mtp implementation is poor or buggy, Ling-2.6 has only 1 extra head, giving only 1 extra token - does not suffice, or maybe the quantisation is detremental)
+
+### Build
+
+```bash
+git clone https://github.com/ljubomirj/llama.cpp.git
+cd llama.cpp
+git checkout LJ-Ling-2.6-flash-r2
+mkdir -p build && cd build
+cmake .. -DLLAMA_METAL=ON
+make -j llama-cli llama-server llama-batched-bench
+```
+
+### CLI
+
+```bash
+./bin/llama-cli \
+  -m Ling-2.6-flash-IQ4_NL-bailing_hybrid-20260505-LJ.gguf \
+  -st -p "The capital of France is"
+```
+
+```bash
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.013 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M2 Max)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple8  (1008)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal3  (5001)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 92274.69 MB
+
+Loading model...
+
+> The capital of France is
+
+The capital of France is Paris.
+
+[ Prompt: 96.1 t/s | Generation: 33.3 t/s ]
+
+Exiting...
+common_memory_breakdown_print: | memory breakdown [MiB]  | total    free     self   model   context   compute    unaccounted |
+common_memory_breakdown_print: |   - MTL0 (Apple M2 Max) | 88000 = 27848 + (59447 = 58324 +     632 +     490) +         704 |
+common_memory_breakdown_print: |   - Host                |                    653 =   345 +       0 +     308                |
+ggml_metal_free: deallocating
+```
+
+### Server
+
+```bash
+./bin/llama-server \
+  -m Ling-2.6-flash-IQ4_NL-bailing_hybrid-20260505-LJ.gguf \
+  -ctx 4096 -fa -ngl 99
+```
+
+## Performance (MacBook Pro M2 Max, 96 GB)
+
+- Prefill: ~250-400 tok/s
+- Generation: ~30-45 tok/s
+
+```bash
+./bin/llama-batched-bench -m ~/llama.cpp/models/Ling-2.6-flash-IQ4_NL-bailing_hybrid-20260505-LJ.gguf -npp 512,1024,2048,4096,8192,16384,32768 -ntg 128 -npl 1 -c 36000
+```
+
+```bash
+main: n_kv_max = 36096, n_batch = 2048, n_ubatch = 512, flash_attn = -1, is_pp_shared = 0, is_tg_separate = 0, n_gpu_layers = -1, n_threads = 8, n_threads_batch = 8
+
+|    PP |     TG |    B |   N_KV |   T_PP s | S_PP t/s |   T_TG s | S_TG t/s |      T s |    S t/s |
+|-------|--------|------|--------|----------|----------|----------|----------|----------|----------|
+|   512 |    128 |    1 |    640 |    1.169 |   437.96 |    2.739 |    46.73 |    3.908 |   163.75 |
+|  1024 |    128 |    1 |   1152 |    2.855 |   358.72 |    3.534 |    36.22 |    6.389 |   180.32 |
+|  2048 |    128 |    1 |   2176 |    6.073 |   337.25 |    3.535 |    36.20 |    9.608 |   226.48 |
+|  4096 |    128 |    1 |   4224 |   12.564 |   326.00 |    3.753 |    34.10 |   16.318 |   258.86 |
+|  8192 |    128 |    1 |   8320 |   26.474 |   309.43 |    3.938 |    32.50 |   30.412 |   273.57 |
+| 16384 |    128 |    1 |  16512 |   57.800 |   283.46 |    4.252 |    30.10 |   62.052 |   266.10 |
+| 32768 |    128 |    1 |  32896 |  131.884 |   248.46 |    4.631 |    27.64 |  136.515 |   240.97 |
+
+llama_perf_context_print:        load time =    7196.80 ms
+llama_perf_context_print: prompt eval time =  239042.77 ms / 65040 tokens (    3.68 ms per token,   272.09 tokens per second)
+llama_perf_context_print:        eval time =   26374.75 ms /   896 runs   (   29.44 ms per token,    33.97 tokens per second)
+llama_perf_context_print:       total time =  272401.59 ms / 65936 tokens
+llama_perf_context_print:    graphs reused =        889
+```
+
+## Implementation Notes
+
+### Reference: `bailing_hybrid.py`
+
+The [`docs/bailing_hybrid.py`](https://github.com/ljubomirj/llama.cpp/blob/LJ-Ling-2.6-flash-r2/docs/bailing_hybrid.py) in the llama.cpp fork is the original MLX model implementation from [mlx-lm PR #1227](https://github.com/ml-explore/mlx-lm/pull/1227). It was the primary reference for porting the Bailing Hybrid architecture to llama.cpp — covering MLA attention, GLA (Gated Linear Attention) with the recurrent state kernel, MoE expert routing, and the MTP speculative decoding head.
+
+### GLA Slope Fix
+
+The upstream model had an [off-by-one bug in the GLA decay slope](https://huggingface.co/inclusionAI/Ling-2.6-flash/commit/7c60792051a885a3f14a75576f01f7f5cb6a08ff): `(self.layer_idx - 1)` was used instead of `self.layer_idx` in the layer-dependent decay scaling. This caused incorrect decay rates for GLA layers, with the most severe effect on layer 0 (which got a negative slope). Our llama.cpp implementation used the correct formula from the start: `layer_factor = 1.0 - il / (n_layer - 1) + 1e-5`.
+
+### MTP (Multi-Token Prediction)
+
+The MTP speculative decoding head works (100% draft acceptance with greedy sampling) but provides no speedup for this model. Ling-2.6 has only 1 MTP head (`nextn_predict_layers=1`), limiting speculative decoding to 1 draft per trunk verification pass. With the MTP head on CPU, the extra draft overhead exceeds any trunk pass savings. Models with multiple MTP heads (e.g. DeepSeek-V3 with 3 heads) would benefit more.
+
+## Quantization Method
+
+This GGUF quantization was developed entirely by AI coding agents reading the [`bailing_hybrid.py`](https://github.com/ml-explore/mlx-lm/pull/1227) implementation from [mlx-lm#1227](https://github.com/ml-explore/mlx-lm/pull/1227) and adapting it for llama.cpp compatibility.
+
+Agents / LLMs used to make this run on my M2 Max:
+- **Claude / GLM-5.1**
+- **OpenCode / Kimi-K2.6**
+- **OpenCode / DeepSeek-V4-Pro**
+
+## Credits
+
+- The OG [llama.cpp](https://github.com/ggml-org/llama.cpp) making all this possible!
+- Original model [inclusionAI/Ling-2.6-flash](https://huggingface.co/inclusionAI/Ling-2.6-flash)
+- The original [`bailing_hybrid.py`](https://github.com/ml-explore/mlx-lm/pull/1227) implementation from [mlx-lm#1227](https://github.com/ml-explore/mlx-lm/pull/1227)
+- MLX reference implementation: [mlx-community/Ling-2.6-flash-mlx-4bit-DWQ](https://huggingface.co/mlx-community/Ling-2.6-flash-mlx-4bit-DWQ)
+- Custom llama.cpp fork [ljubomirj/llama.cpp @ LJ-Ling-2.6-flash-r2](https://github.com/ljubomirj/llama.cpp/tree/LJ-Ling-2.6-flash-r2)
+
