@@ -11434,6 +11434,318 @@ class BailingMoeV2Model(TextModel):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
+@ModelBase.register("BailingMoeV2_5ForCausalLM")
+class BailingMoeV2_5Model(TextModel):
+    model_arch = gguf.MODEL_ARCH.BAILING_HYBRID
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        nextn_layers = self.hparams.get("num_nextn_predict_layers", 0)
+        if nextn_layers:
+            self.block_count = self.hparams["num_hidden_layers"] + nextn_layers
+            self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+        self._nextn_predict_layers = nextn_layers
+
+    def set_vocab(self):
+        self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        hparams = self.hparams
+        if (rope_dim := hparams.get("head_dim")) is None:
+            rope_dim = hparams["hidden_size"] // hparams["num_attention_heads"]
+
+        self.gguf_writer.add_rope_dimension_count(int(rope_dim * hparams.get("partial_rotary_factor", 0.5)))
+        self.gguf_writer.add_leading_dense_block_count(hparams["first_k_dense_replace"])
+        self.gguf_writer.add_vocab_size(hparams["vocab_size"])
+
+        # MLA parameters
+        if (q_lora_rank := hparams.get("q_lora_rank")) is not None:
+            self.gguf_writer.add_q_lora_rank(q_lora_rank)
+        self.gguf_writer.add_kv_lora_rank(hparams["kv_lora_rank"])
+        self.gguf_writer.add_key_length_mla(hparams["qk_nope_head_dim"] + hparams["qk_rope_head_dim"])
+        self.gguf_writer.add_value_length_mla(hparams["v_head_dim"])
+
+        # Hybrid layer grouping
+        self.gguf_writer.add_full_attention_interval(hparams.get("layer_group_size", 8))
+
+        # Group norm for GLA layers
+        self.gguf_writer.add_group_norm_groups(hparams.get("group_norm_size", 4))
+        self.gguf_writer.add_group_norm_eps(hparams.get("rms_norm_eps", 1e-6))
+
+        # Per-layer head_count_kv: 0 for GLA (recurrent), 1 for MLA, n_head for MTP
+        hparams = self.hparams
+        n_layer = self.block_count
+        layer_group_size = hparams.get("layer_group_size", 8)
+        head_count_kv = []
+        for il in range(n_layer):
+            if il >= n_layer - self._nextn_predict_layers:
+                head_count_kv.append(hparams["num_attention_heads"])
+            elif (il + 1) % layer_group_size == 0:
+                head_count_kv.append(1)
+            else:
+                head_count_kv.append(0)
+        self.gguf_writer.add_head_count_kv(head_count_kv)
+
+        # MoE parameters
+        self.gguf_writer.add_expert_feed_forward_length(hparams["moe_intermediate_size"])
+        self.gguf_writer.add_expert_shared_feed_forward_length(hparams.get("moe_shared_expert_intermediate_size", hparams.get("moe_intermediate_size", 0) * hparams.get("num_shared_experts", 1)))
+        self.gguf_writer.add_expert_weights_scale(hparams.get("routed_scaling_factor", 1.0))
+        self.gguf_writer.add_expert_shared_count(hparams.get("num_shared_experts", 0))
+        self.gguf_writer.add_expert_weights_norm(hparams.get("norm_topk_prob", True))
+
+        if (score_func := hparams.get("score_function")) is not None:
+            if score_func == "sigmoid":
+                self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
+            elif score_func == "softmax":
+                self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SOFTMAX)
+
+        if (n_group := hparams.get("n_group")) is not None:
+            self.gguf_writer.add_expert_group_count(n_group)
+        if (topk_group := hparams.get("topk_group")) is not None:
+            self.gguf_writer.add_expert_group_used_count(topk_group)
+
+        if (nextn_layers := hparams.get("num_nextn_predict_layers")) is not None:
+            self.gguf_writer.add_nextn_predict_layers(nextn_layers)
+
+
+
+    _experts: list[dict[str, Tensor]] | None = None
+    _mlx_scales: dict[str, Tensor] = {}
+    _mlx_biases: dict[str, Tensor] = {}
+    _mlx_original_names: dict[str, str] = {}
+    _mlx_weight_tensors: dict[str, Callable[[], Tensor]] = {}
+
+    @staticmethod
+    def _dequantize_mlx_4bit(weight: Tensor, scale: Tensor, bias: Tensor) -> Tensor:
+        """
+        Dequantize MLX 4-bit packed weights.
+        weight: [out_dim, in_dim/8] uint32 - 8 packed 4-bit values per U32
+        scale: [out_dim, in_dim/8/8] bfloat16 - scale factors
+        bias: [out_dim, in_dim/8/8] bfloat16 - bias terms
+        """
+        import numpy as np
+
+        def _unpack_uint32_to_int4(weight_np, shape_prefix):
+            """
+            Vectorized unpacking of uint32 array to int4 values.
+            Input: [*shape_prefix, group_dim, uint32_per_group] uint32
+            Output: [*shape_prefix, group_dim * uint32_per_group * 8] float32
+            """
+            shifts = np.array([0, 4, 8, 12, 16, 20, 24, 28], dtype=np.uint32)
+            ndim = weight_np.ndim
+            expand_dims = (np.newaxis,) * (ndim - 2)
+            w = weight_np[..., np.newaxis]
+            s = shifts[(np.newaxis,) * (ndim - 1) + (slice(None),)]
+
+            four_bits = (w >> s) & np.uint32(0x0F)
+            four_bits = four_bits.astype(np.float32)
+            four_bits = np.where(four_bits >= 8.0, four_bits - 16.0, four_bits)
+            out = four_bits.reshape(shape_prefix + (-1,))
+            return out
+
+        # Handle both 2D and 3D tensors (3D for MoE experts)
+        if weight.dim() == 3:
+            n_experts, out_dim, packed_dim = weight.shape
+            group_dim = scale.shape[2]
+            uint32_per_group = packed_dim // group_dim
+            values_per_group = uint32_per_group * 8
+
+            if scale.dtype == torch.bfloat16:
+                scale = scale.to(torch.float32)
+            if bias.dtype == torch.bfloat16:
+                bias = bias.to(torch.float32)
+            scale_np = scale.cpu().numpy().astype(np.float32)
+            bias_np = bias.cpu().numpy().astype(np.float32)
+
+            logger.info(f"MoE dequantization: weight shape=({n_experts}, {out_dim}, {packed_dim}), scale shape={scale_np.shape}")
+
+            weight_np = weight.to(torch.uint32).cpu().numpy()
+            weight_np = weight_np.reshape(n_experts, out_dim, group_dim, uint32_per_group)
+
+            chunk_size = 16
+            dequantized_parts = []
+            for e_start in range(0, n_experts, chunk_size):
+                e_end = min(e_start + chunk_size, n_experts)
+                unpacked = _unpack_uint32_to_int4(weight_np[e_start:e_end], (e_end - e_start, out_dim))
+                scale_c = np.repeat(scale_np[e_start:e_end], values_per_group, axis=2)
+                bias_c = np.repeat(bias_np[e_start:e_end], values_per_group, axis=2)
+                dequantized_parts.append(unpacked * scale_c + bias_c)
+                if e_start % (chunk_size * 4) == 0 or e_end == n_experts:
+                    logger.debug(f"  expert chunk {e_start}-{e_end}/{n_experts}")
+
+            dequantized = np.concatenate(dequantized_parts, axis=0)
+            return torch.from_numpy(dequantized).to(torch.float32)
+
+        out_dim, packed_dim = weight.shape
+        group_dim = scale.shape[1]
+        uint32_per_group = packed_dim // group_dim
+        values_per_group = uint32_per_group * 8
+
+        weight_np = weight.view(out_dim, group_dim, uint32_per_group).to(torch.uint32).cpu().numpy()
+
+        if scale.dtype == torch.bfloat16:
+            scale = scale.to(torch.float32)
+        if bias.dtype == torch.bfloat16:
+            bias = bias.to(torch.float32)
+        scale_np = scale.cpu().numpy().astype(np.float32)
+        bias_np = bias.cpu().numpy().astype(np.float32)
+
+        unpacked = _unpack_uint32_to_int4(weight_np, (out_dim,))
+        scale_expanded = np.repeat(scale_np, values_per_group, axis=1)
+        bias_expanded = np.repeat(bias_np, values_per_group, axis=1)
+        dequantized = unpacked * scale_expanded + bias_expanded
+        return torch.from_numpy(dequantized).to(torch.float32)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        import re
+
+        # Handle kv_b_proj splitting for absorbed MLA (original BF16 model)
+        if bid is not None and name.endswith(".attention.kv_b_proj.weight"):
+            n_head = self.hparams["num_attention_heads"]
+            nope_dim = self.hparams["qk_nope_head_dim"]
+            v_dim = self.hparams["v_head_dim"]
+            kv_lora_rank = self.hparams["kv_lora_rank"]
+            data_torch = data_torch.float()
+            kv_b = data_torch.view(n_head, nope_dim + v_dim, kv_lora_rank)
+            k_b, v_b = torch.split(kv_b, [nope_dim, v_dim], dim=1)
+            k_b = k_b.transpose(1, 2).contiguous()
+            v_b = v_b.contiguous()
+            k_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_K_B, bid)
+            v_name = self.format_tensor_name(gguf.MODEL_TENSOR.ATTN_V_B, bid)
+            logger.info(f"kv_b_proj split at layer {bid}: k={list(k_b.shape)}, v={list(v_b.shape)}")
+            yield (k_name, k_b)
+            yield (v_name, v_b)
+            return
+
+        # Handle MLX quantization scales and biases - store with original names
+        original_name = name
+
+        if name.endswith(".scales"):
+            weight_name = name.replace(".scales", ".weight")
+            mapped_weight_name = self.map_tensor_name(weight_name)
+            self._mlx_scales[weight_name] = data_torch
+            self._mlx_original_names[mapped_weight_name] = weight_name
+            logger.info(f"Stored scale for {weight_name} -> mapped as {mapped_weight_name}")
+            return
+
+        if name.endswith(".biases"):
+            weight_name = name.replace(".biases", ".weight")
+            mapped_weight_name = self.map_tensor_name(weight_name)
+            self._mlx_biases[weight_name] = data_torch
+            self._mlx_original_names[mapped_weight_name] = weight_name
+            logger.info(f"Stored bias for {weight_name} -> mapped as {mapped_weight_name}")
+            return
+
+        # Handle per-expert MoE tensors before map_tensor_name (bailing_hybrid naming)
+        if "mlp.experts" in name and re.match(r'model\.layers\.\d+\.mlp\.experts\.\d+\.', name):
+            if bid is None:
+                m = re.match(r'model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.', name)
+                if m:
+                    bid = int(m.group(1))
+                else:
+                    yield from super().modify_tensors(data_torch, name, bid)
+                    return
+            n_experts = self.find_hparam(["num_local_experts", "num_experts"])
+
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+
+            self._experts[bid][name] = data_torch
+
+            if len(self._experts[bid]) >= n_experts * 3:
+                for w_name in ["down_proj", "gate_proj", "up_proj"]:
+                    datas: list[Tensor] = []
+                    for xid in range(n_experts):
+                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
+                        datas.append(self._experts[bid][ename])
+                        del self._experts[bid][ename]
+                    data_torch_merged = torch.stack(datas, dim=0)
+                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
+                    yield from super().modify_tensors(data_torch_merged, merged_name, bid)
+            return
+
+        # Map the name first to check against our stored scales/biases
+        mapped_name = self.map_tensor_name(name)
+
+        # Check if this is an embedding/lm_head tensor that should be kept in bfloat16
+        is_embedding_tensor = (
+            "word_embeddings" in name or
+            "lm_head" in name or
+            name == "model.embed_tokens.weight" or
+            "token_embd" in mapped_name or
+            "output" in mapped_name
+        )
+
+        # Check if this is an MLX 4-bit quantized weight that needs dequantization
+        if name.endswith(".weight") and mapped_name in self._mlx_original_names:
+            original_name = self._mlx_original_names[mapped_name]
+            if original_name in self._mlx_scales and original_name in self._mlx_biases:
+                scale = self._mlx_scales[original_name]
+                bias = self._mlx_biases[original_name]
+                logger.info(f"Dequantizing MLX 4-bit tensor: {name} -> {mapped_name}, shape={data_torch.shape}, is_embedding={is_embedding_tensor}")
+                if name in self.model_tensors:
+                    original_tensor = self.model_tensors[name]()
+                    logger.info(f"Loaded original tensor: dtype={original_tensor.dtype}, shape={original_tensor.shape}")
+                    data_torch = self._dequantize_mlx_4bit(original_tensor, scale, bias)
+                    logger.info(f"After dequantization: shape={data_torch.shape}, dtype={data_torch.dtype}")
+                else:
+                    logger.warning(f"Could not load original tensor for {name}, using converted tensor (may be incorrect)")
+            del self._mlx_scales[original_name]
+            del self._mlx_biases[original_name]
+            del self._mlx_original_names[mapped_name]
+
+        # Fix gate dimension: MLX quantization of Ling-2.6 stores gate as [n_expert, 2*n_embd]
+        # but the model expects [n_expert, n_embd] (only first half is the routing gate)
+        if "ffn_gate_inp" in mapped_name and data_torch.dim() == 2:
+            n_expert = data_torch.shape[0]
+            n_embd = self.find_hparam(["hidden_size"])
+            if data_torch.shape[1] == 2 * n_embd:
+                logger.info(f"Trimming ffn_gate_inp from {list(data_torch.shape)} to [{n_expert}, {n_embd}]")
+                data_torch = data_torch[:, :n_embd]
+
+        if "mlp.experts" in name:
+            n_experts = self.find_hparam(["num_local_experts", "num_experts"])
+            assert bid is not None
+
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+
+            self._experts[bid][name] = data_torch
+
+            if len(self._experts[bid]) >= n_experts * 3:
+                for w_name in ["down_proj", "gate_proj", "up_proj"]:
+                    datas: list[Tensor] = []
+
+                    for xid in range(n_experts):
+                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
+                        datas.append(self._experts[bid][ename])
+                        del self._experts[bid][ename]
+
+                    data_torch = torch.stack(datas, dim=0)
+
+                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
+
+                    yield from super().modify_tensors(data_torch, merged_name, bid)
+            return
+
+        if name.endswith(".expert_bias"):
+            name = name.replace(".expert_bias", ".expert_bias.bias")
+
+        yield from super().modify_tensors(data_torch, name, bid)
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+
+        if self._experts is not None:
+            experts = [k for d in self._experts for k in d.keys()]
+            if len(experts) > 0:
+                raise ValueError(f"Unprocessed experts: {experts}")
+
+        if self._mlx_scales or self._mlx_biases:
+            logger.warning(f"Unprocessed MLX tensors: {len(self._mlx_scales)} scales, {len(self._mlx_biases)} biases")
+
+
 @ModelBase.register("GroveMoeForCausalLM", "modeling_grove_moe.GroveMoeForCausalLM")
 class GroveMoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.GROVEMOE

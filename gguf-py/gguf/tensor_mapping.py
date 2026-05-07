@@ -372,6 +372,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.gate_proj", # afmoe
             "model.layers.{bid}.linear_attn.in_proj_z",  # qwen3.5
             "model.layers.{bid}.self_attn.g_proj",    # step3.5 head-wise attention gate
+            "model.layers.{bid}.attention.g_proj",    # bailing_hybrid
         ),
 
         # Feed-forward norm
@@ -449,6 +450,7 @@ class TensorNameMap:
             "backbone.layers.{bid}.mixer.gate",                 # nemotron-h-moe
             "model.layers.{bid}.moe.gate",                      # step3.5
             "model.layers.{bid}.router.proj",                   # gemma4
+            "model.layers.{bid}.mlp.gate.gate_proj",            # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_GATE_INP_SHEXP: (
@@ -508,6 +510,7 @@ class TensorNameMap:
             "layers.{bid}.mlp.up_proj",                               # qwen3-embedding
             "backbone.layers.{bid}.mixer.up_proj",                    # nemotron-h
             "model.layers.{bid}.mlp.language_mlp.up_proj",            # cogvlm
+            "model.layers.{bid}.mlp.up_proj",                         # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_UP_EXP: (
@@ -520,9 +523,7 @@ class TensorNameMap:
             "encoder.layers.{bid}.mlp.experts.mlp.w1",              # nomic-bert-moe
             "model.layers.{bid}.block_sparse_moe.experts.up", # smallthinker
             "model.layers.{bid}.moe.up_proj",                       # step3.5
-        ),
-
-        MODEL_TENSOR.FFN_UP_SHEXP: (
+            "model.layers.{bid}.mlp.switch_mlp.up_proj",            # bailing_hybrid (
             "model.layers.{bid}.mlp.shared_expert.up_proj",          # qwen2moe
             "model.layers.{bid}.mlp.shared_experts.up_proj",         # deepseek deepseek2
             "model.layers.{bid}.feed_forward.shared_expert.up_proj", # llama4
@@ -532,6 +533,7 @@ class TensorNameMap:
             "backbone.layers.{bid}.mixer.shared_experts.up_proj",    # nemotron-h-moe
             "model.layers.{bid}.block_sparse_moe.shared_experts.up_proj", # kimi
             "model.layers.{bid}.share_expert.up_proj",               # step3.5
+            "model.layers.{bid}.mlp.shared_experts.up_proj",         # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_UP_CHEXP: (
@@ -561,6 +563,7 @@ class TensorNameMap:
             "model.transformer.blocks.{bid}.ff_proj",         # llada
             "layers.{bid}.mlp.gate_proj",                     # qwen3-embedding
             "model.layers.{bid}.mlp.language_mlp.gate_proj",  # cogvlm
+            "model.layers.{bid}.mlp.gate_proj",               # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_GATE_EXP: (
@@ -572,6 +575,7 @@ class TensorNameMap:
             "model.layers.{bid}.feed_forward.experts.gate_proj",        # llama4
             "model.layers.{bid}.block_sparse_moe.experts.gate",         # smallthinker
             "model.layers.{bid}.moe.gate_proj",                         # step3.5
+            "model.layers.{bid}.mlp.switch_mlp.gate_proj",              # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_GATE_SHEXP: (
@@ -582,6 +586,7 @@ class TensorNameMap:
             "layers.{bid}.shared_experts.w1",                          # mistral-large
             "model.layers.{bid}.block_sparse_moe.shared_experts.gate_proj", # kimi
             "model.layers.{bid}.share_expert.gate_proj",               # step3.5
+            "model.layers.{bid}.mlp.shared_experts.gate_proj",         # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_GATE_CHEXP: (
@@ -636,6 +641,7 @@ class TensorNameMap:
             "layers.{bid}.mlp.down_proj",                             # qwen3-embedding
             "backbone.layers.{bid}.mixer.down_proj",                  # nemotron-h
             "model.layers.{bid}.mlp.language_mlp.down_proj",          # cogvlm
+            "model.layers.{bid}.mlp.down_proj",                       # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_DOWN_EXP: (
@@ -650,6 +656,7 @@ class TensorNameMap:
             "model.layers.{bid}.block_sparse_moe.experts.down",     # smallthinker
             "model.layers.{bid}.moe.down_proj",                     # step3.5
             "model.layers.{bid}.experts.down_proj",                 # gemma4
+            "model.layers.{bid}.mlp.switch_mlp.down_proj",          # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_DOWN_SHEXP: (
@@ -662,6 +669,7 @@ class TensorNameMap:
             "backbone.layers.{bid}.mixer.shared_experts.down_proj",    # nemotron-h-moe
             "model.layers.{bid}.block_sparse_moe.shared_experts.down_proj", # kimi
             "model.layers.{bid}.share_expert.down_proj",               # step3.5
+            "model.layers.{bid}.mlp.shared_experts.down_proj",         # bailing_hybrid
         ),
 
         MODEL_TENSOR.FFN_DOWN_CHEXP: (
@@ -712,6 +720,7 @@ class TensorNameMap:
             "encoder.layer.{bid}.mlp.layernorm",            # jina-bert-v2
             "encoder.layer.{bid}.layer_norm_2",             # jina-v2-code
             "model.layers.{bid}.final_layernorm",           # bailingmoe2
+            "model.layers.{bid}.attention.g_norm",          # bailing_hybrid
         ),
 
         MODEL_TENSOR.LAYER_OUT_SCALE: (
@@ -1070,16 +1079,19 @@ class TensorNameMap:
         MODEL_TENSOR.ATTN_Q_A: (
             "model.layers.{bid}.self_attn.q_a_proj", # deepseek2
             "layers.{bid}.attention.wq_a",           # mistral-large
+            "model.layers.{bid}.attention.q_a_proj", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_Q_B: (
             "model.layers.{bid}.self_attn.q_b_proj", # deepseek2
             "layers.{bid}.attention.wq_b",           # mistral-large
+            "model.layers.{bid}.attention.q_b_proj", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_KV_A_MQA: (
             "model.layers.{bid}.self_attn.kv_a_proj_with_mqa", # deepseek2
             "layers.{bid}.attention.wkv_a_with_mqa",           # mistral-large
+            "model.layers.{bid}.attention.kv_a_proj_with_mqa", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_KV_B: (
@@ -1089,21 +1101,26 @@ class TensorNameMap:
         MODEL_TENSOR.ATTN_K_B: (
             "model.layers.{bid}.self_attn.k_b_proj",  # deepseek2
             "layers.{bid}.attention.k_b_proj",        # mistral-large
+            "model.layers.{bid}.attention.embed_q",   # bailing_hybrid
+            "model.layers.{bid}.attention.kv_b_proj", # bailing_hybrid combined KV (split during conversion)
         ),
 
         MODEL_TENSOR.ATTN_V_B: (
             "model.layers.{bid}.self_attn.v_b_proj",  # deepseek2
             "layers.{bid}.attention.v_b_proj",        # mistral-large
+            "model.layers.{bid}.attention.unembed_out", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_Q_A_NORM: (
             "model.layers.{bid}.self_attn.q_a_layernorm", # deepseek2
             "layers.{bid}.attention.q_a_norm",            # mistral-large
+            "model.layers.{bid}.attention.q_a_layernorm", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_KV_A_NORM: (
             "model.layers.{bid}.self_attn.kv_a_layernorm", # deepseek2
             "layers.{bid}.attention.kv_a_norm",            # mistral-large
+            "model.layers.{bid}.attention.kv_a_layernorm", # bailing_hybrid
         ),
 
         MODEL_TENSOR.ATTN_SUB_NORM: (

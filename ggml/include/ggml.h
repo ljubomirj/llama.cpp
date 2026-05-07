@@ -2506,7 +2506,8 @@ extern "C" {
             struct ggml_tensor  * q,
             struct ggml_tensor  * g,
             struct ggml_tensor  * state,
-            float scale);
+            float                 scale,
+            bool                  keep_intermediates);
 
     GGML_API struct ggml_tensor * ggml_rwkv_wkv7(
             struct ggml_context * ctx,

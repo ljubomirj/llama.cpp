@@ -617,6 +617,32 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net(
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_linear_attn(ggml_metal_library_t lib, const ggml_tensor * op) {
+    char base[256];
+    char name[256];
+
+    const int S = op->src[0]->ne[0]; // head_size
+    const int nsg = S / 32;
+    const bool keep_intermediates = ggml_get_op_params_i32(op, 1) != 0;
+
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->ne[0] == S * op->src[0]->ne[1]);
+    GGML_ASSERT(S % 32 == 0);
+
+    const char * prefix = keep_intermediates ? "kernel_gated_linear_attn_ki" : "kernel_gated_linear_attn";
+    snprintf(base, 256, "%s_%s_%d", prefix, ggml_type_name(op->src[0]->type), nsg);
+    snprintf(name, 256, "%s", base);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    res.nsg = nsg;
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri(ggml_metal_library_t lib, const ggml_tensor * op) {
     char base[256];
     char name[256];

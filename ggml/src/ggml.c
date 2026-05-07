@@ -5736,7 +5736,8 @@ struct ggml_tensor * ggml_gated_linear_attn(
         struct ggml_tensor  * q,
         struct ggml_tensor  * g,
         struct ggml_tensor  * state,
-        float scale) {
+        float                 scale,
+        bool                  keep_intermediates) {
     GGML_ASSERT(ggml_is_contiguous(k));
     GGML_ASSERT(ggml_is_contiguous(v));
     GGML_ASSERT(ggml_is_contiguous(q));
@@ -5754,11 +5755,15 @@ struct ggml_tensor * ggml_gated_linear_attn(
         GGML_ASSERT(ggml_nelements(state) == S * S * H * n_seqs);
     }
 
-    // concat output and new_state
-    const int64_t ne[4] = { S * H, n_tokens + S * n_seqs, 1, 1 };
+    const int64_t state_rows = keep_intermediates ? n_tokens * S * n_seqs : S * n_seqs;
+
+    // concat output and new_state (and intermediate states if keep_intermediates)
+    const int64_t ne[4] = { S * H, n_tokens * n_seqs + state_rows, 1, 1 };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
     ggml_set_op_params_f32(result, 0, scale);
+    int32_t flag = keep_intermediates ? 1 : 0;
+    ggml_set_op_params_i32(result, 1, flag);
 
     result->op     = GGML_OP_GATED_LINEAR_ATTN;
     result->src[0] = k;

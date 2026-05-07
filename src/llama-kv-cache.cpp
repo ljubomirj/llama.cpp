@@ -1154,9 +1154,13 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    const uint32_t n_head_kv = hparams.n_head_kv(il);
+
+    const uint32_t n_embd_head = n_head_kv > 0 ? hparams.n_embd_k_gqa(il) / n_head_kv : hparams.n_embd_head_k(il);
+
     return ggml_view_4d(ctx, k,
-            hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, ns,
-            ggml_row_size(k->type, hparams.n_embd_head_k(il)),
+            n_embd_head, n_head_kv, n_kv, ns,
+            ggml_row_size(k->type, n_embd_head),
             ggml_row_size(k->type, n_embd_k_gqa),
             ggml_row_size(k->type, n_embd_k_gqa*kv_size),
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);

@@ -2751,6 +2751,131 @@ template [[host_name("kernel_gated_delta_net_f32_2")]] kernel kernel_gated_delta
 template [[host_name("kernel_gated_delta_net_f32_4")]] kernel kernel_gated_delta_net_t kernel_gated_delta_net_impl<float4, 4>;
 #endif
 
+// Gated Linear Attention (GLA) kernel
+// k, v, q, g: [S, H, n_tokens]
+// state_in:   [S*S*H, n_seqs]
+// output (no intermediates):  [S*H, n_tokens*n_seqs + S*n_seqs] (activations + final state)
+// output (keep_intermediates): [S*H, n_tokens*n_seqs + S*S*H*n_seqs + (n_seq_tokens-1)*S*S*H*n_seqs]
+//   layout: [activations] [final_state] [snapshots: state after confirmed token, state after draft skip, ...]
+//   saves state after each token EXCEPT the last (which is stored as final state)
+//   snap_idx = t_in_seq (0-indexed per sequence), skip t_end-1
+// grid=(S/NSG, S/4, H*n_seqs), threadgroup=(NW, 4, 1)
+template<short NSG, bool KEEP_INTERMEDIATES>
+kernel void kernel_gated_linear_attn_impl(
+        constant ggml_metal_kargs_gated_linear_attn & args,
+        device const char * k,
+        device const char * v,
+        device const char * q,
+        device const char * g,
+        device const char * s,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        uint3 tpitg[[thread_position_in_threadgroup]],
+        uint3   ntg[[threads_per_threadgroup]])  {
+
+    const short S       = args.ne00;
+    const short H       = args.ne01;
+    const short n_seqs  = args.ne41;
+    const short T_total = args.ne02;
+    const short T_per_seq = T_total / n_seqs;
+
+    const float scale = args.scale;
+
+    const short tx = tpitg.x;
+    const short ty = tpitg.y;
+
+    const short n = tgpig.z;
+    const short h_idx = n % H;
+    const short seq_idx = n / H;
+
+    const short j = tgpig.y * 4 + ty;
+    const short i_start = tgpig.x * NSG;
+
+    // Token range
+    const short t_start = seq_idx * T_per_seq;
+    const short t_end = t_start + T_per_seq;
+
+    // State: [S*S*H, n_seqs], offset for this (head, seq)
+    device const float * s_in = (device const float *) s + (seq_idx * H + h_idx) * S * S;
+
+    float state_vals[NSG];
+    FOR_UNROLL (short i = 0; i < NSG; i++) {
+        const short ii = i_start + tx*NSG + i;
+        state_vals[i] = (ii < S && j < S) ? s_in[ii * S + j] : 0.0f;
+    }
+
+    device float * dst_out = (device float *) dst + t_start * S * H;
+
+    // State output starts after all activations
+    const int64_t state_base = (int64_t)T_total * S * H;
+
+    for (short t = t_start; t < t_end; t++) {
+        device const float * k_t = (device const float *) (k + t * args.ns02 * sizeof(float) + h_idx * S * sizeof(float));
+        device const float * v_t = (device const float *) (v + t * args.ns12 * sizeof(float) + h_idx * S * sizeof(float));
+        device const float * q_t = (device const float *) (q + t * args.ns22 * sizeof(float) + h_idx * S * sizeof(float));
+        device const float * g_t = (device const float *) (g + t * args.ns32 * sizeof(float) + h_idx * S * sizeof(float));
+
+        float v_val = (j < S) ? v_t[j] : 0.0f;
+        float out_j = 0.0f;
+
+        FOR_UNROLL (short i = 0; i < NSG; i++) {
+            const short ii = i_start + tx*NSG + i;
+            float k_val = (ii < S) ? k_t[ii] : 0.0f;
+            float q_val = (ii < S) ? q_t[ii] * scale : 0.0f;
+            float g_val = (ii < S) ? g_t[ii] : 0.0f;
+
+            state_vals[i] = state_vals[i] * g_val + k_val * v_val;
+            out_j += state_vals[i] * q_val;
+        }
+
+        out_j = simd_sum(out_j);
+
+        if (tx == 0 && j < S) {
+            dst_out[(t - t_start) * S * H + h_idx * S + j] = out_j;
+        }
+
+        // Store intermediate state for rollback (save state after each token except the last)
+        // The snapshot at index (t - t_start) is the state AFTER confirmed tokens,
+        // BEFORE the draft token. On draft rejection, this is what we roll back to.
+        if (KEEP_INTERMEDIATES && t < t_end - 1) {
+            const short t_in_seq = t - t_start;
+            const int64_t state_elems_all = (int64_t)S * S * H * n_seqs;
+            device float * snap = (device float *) dst + state_base + state_elems_all
+                + ((int64_t)t_in_seq * n_seqs + seq_idx) * H * S * S + h_idx * S * S;
+            FOR_UNROLL (short i = 0; i < NSG; i++) {
+                const short ii = i_start + tx*NSG + i;
+                if (ii < S && j < S) {
+                    snap[ii * S + j] = state_vals[i];
+                }
+            }
+        }
+    }
+
+    // Store final state
+    device float * dst_state = (device float *) dst + state_base + (seq_idx * H + h_idx) * S * S;
+
+    FOR_UNROLL (short i = 0; i < NSG; i++) {
+        const short ii = i_start + tx*NSG + i;
+        if (ii < S && j < S) {
+            dst_state[ii * S + j] = state_vals[i];
+        }
+    }
+}
+
+typedef decltype(kernel_gated_linear_attn_impl<4, false>) kernel_gated_linear_attn_t;
+
+template [[host_name("kernel_gated_linear_attn_f32_1")]] kernel kernel_gated_linear_attn_t kernel_gated_linear_attn_impl<1, false>;
+template [[host_name("kernel_gated_linear_attn_f32_2")]] kernel kernel_gated_linear_attn_t kernel_gated_linear_attn_impl<2, false>;
+template [[host_name("kernel_gated_linear_attn_f32_4")]] kernel kernel_gated_linear_attn_t kernel_gated_linear_attn_impl<4, false>;
+template [[host_name("kernel_gated_linear_attn_f32_8")]] kernel kernel_gated_linear_attn_t kernel_gated_linear_attn_impl<8, false>;
+
+typedef decltype(kernel_gated_linear_attn_impl<4, true>) kernel_gated_linear_attn_ki_t;
+
+template [[host_name("kernel_gated_linear_attn_ki_f32_1")]] kernel kernel_gated_linear_attn_ki_t kernel_gated_linear_attn_impl<1, true>;
+template [[host_name("kernel_gated_linear_attn_ki_f32_2")]] kernel kernel_gated_linear_attn_ki_t kernel_gated_linear_attn_impl<2, true>;
+template [[host_name("kernel_gated_linear_attn_ki_f32_4")]] kernel kernel_gated_linear_attn_ki_t kernel_gated_linear_attn_impl<4, true>;
+template [[host_name("kernel_gated_linear_attn_ki_f32_8")]] kernel kernel_gated_linear_attn_ki_t kernel_gated_linear_attn_impl<8, true>;
+
 constant short FC_solve_tri_nsg [[function_constant(FC_SOLVE_TRI + 0)]];
 constant short FC_solve_tri_n   [[function_constant(FC_SOLVE_TRI + 1)]];
 constant short FC_solve_tri_k   [[function_constant(FC_SOLVE_TRI + 2)]];

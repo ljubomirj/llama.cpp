@@ -103,6 +103,10 @@ uint32_t llama_hparams::n_embd_head_v(uint32_t il) const {
 uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
     const uint32_t n_head_kv = this->n_head_kv(il);
 
+    if (is_mla() && n_head_kv == 1) {
+        return n_lora_kv + n_rot(il);
+    }
+
     return n_embd_head_k(il) * n_head_kv;
 }
 

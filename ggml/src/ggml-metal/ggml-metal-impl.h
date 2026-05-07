@@ -890,6 +890,70 @@ typedef struct {
 } ggml_metal_kargs_gated_delta_net;
 
 typedef struct {
+    // k (src[0]): [S, H, n_tokens]
+    int32_t  ne00;
+    int32_t  ne01;
+    int32_t  ne02;
+    int32_t  ne03;
+    uint64_t nb00;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    // v (src[1]): [S, H, n_tokens]
+    int32_t  ne10;
+    int32_t  ne11;
+    int32_t  ne12;
+    int32_t  ne13;
+    uint64_t nb10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    // q (src[2]): [S, H, n_tokens]
+    int32_t  ne20;
+    int32_t  ne21;
+    int32_t  ne22;
+    int32_t  ne23;
+    uint64_t nb20;
+    uint64_t nb21;
+    uint64_t nb22;
+    uint64_t nb23;
+    // g (src[3]): [S, H, n_tokens]
+    int32_t  ne30;
+    int32_t  ne31;
+    int32_t  ne32;
+    int32_t  ne33;
+    uint64_t nb30;
+    uint64_t nb31;
+    uint64_t nb32;
+    uint64_t nb33;
+    // state (src[4]): [S*S*H, n_seqs]
+    int32_t  ne40;
+    int32_t  ne41;
+    int32_t  ne42;
+    int32_t  ne43;
+    uint64_t nb40;
+    uint64_t nb41;
+    uint64_t nb42;
+    uint64_t nb43;
+    // strides between tokens within each source
+    int32_t  ns02; // k stride = nb02/sizeof(float)
+    int32_t  ns12; // v stride
+    int32_t  ns22; // q stride
+    int32_t  ns32; // g stride
+    // output: [S*H, n_tokens + S*n_seqs]
+    int32_t  ne0;
+    int32_t  ne1;
+    int32_t  ne2;
+    int32_t  ne3;
+    uint64_t nb0;
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+    // scale from op params
+    float    scale;
+} ggml_metal_kargs_gated_linear_attn;
+
+typedef struct {
     int32_t  ne00;
     int32_t  ne01;
     int32_t  ne02;
