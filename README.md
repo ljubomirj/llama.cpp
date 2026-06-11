@@ -1,3 +1,21 @@
+# LJ Ling-2.6-flash R2 Branch
+
+This personal fork branch is the current public llama.cpp forward-port for `inclusionAI/Ling-2.6-flash`, a Bailing Hybrid model combining MLA, recurrent GLA, MoE layers, and one MTP prediction head.
+
+The branch was rebuilt on a newer upstream llama.cpp base (`2496f9c14`, tag `b9049`) rather than continuing the earlier `LJ-Ling-2.6-flash` history. It forward-ports the Bailing Hybrid architecture, GGUF conversion support, the Metal GLA kernel and recurrent-state handling, and experimental MTP integration. The MTP path works but did not improve decode speed in the recorded M2 Max tests.
+
+The older `LJ-Ling-2.6-flash` branch is an earlier implementation. This `-r2` branch supersedes it for public use.
+
+Documentation:
+
+- [Model card, build instructions, and M2 Max results](README.HF)
+- [MTP investigation notes](docs/mtp/README.md)
+- [Branch-specific learnings](LEARNINGS.md)
+
+The original upstream README follows.
+
+---
+
 # llama.cpp
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
