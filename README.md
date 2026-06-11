@@ -2,7 +2,7 @@
 
 This personal fork branch publishes DiffusionGemma 26B-A4B Q8_0 benchmark results from a 2023 MacBook Pro with an Apple M2 Max and 96 GB unified memory.
 
-This branch is based on upstream `llama.cpp` and does not add DiffusionGemma runtime support. The tests used Daniel Hanchen's `diffusion-visual-updates` fork at commit `15ad8f4201d05fee7be94e42ac73fc934ff20235`, which implements the dedicated diffusion runner from upstream PR [#24423](https://github.com/ggml-org/llama.cpp/pull/24423).
+This branch is based on upstream `llama.cpp` and does not add DiffusionGemma runtime support. The tests used Daniel Hanchen's [diffusion-visual-updates](https://github.com/danielhanchen/llama.cpp/tree/diffusion-visual-updates) fork at commit `15ad8f4201d05fee7be94e42ac73fc934ff20235`, which implements the dedicated diffusion runner from upstream PR [#24423](https://github.com/ggml-org/llama.cpp/pull/24423).
 
 Reports:
 
