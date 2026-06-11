@@ -8,6 +8,55 @@ Reports:
 
 - [Benchmark summary](DIFFUSIONGEMMA-26B-A4B_METAL_BENCHMARK_REPORT.md)
 - [Detailed technical report](DIFFUSIONGEMMA-26B-A4B_TECHNICAL_REPORT.md)
+- [M2 Max launcher used for the tests](llama_server_diffusiongemma-26b-a4b_macbook2.sh)
+
+## Launcher
+
+`llama_server_diffusiongemma-26b-a4b_macbook2.sh` is the launcher used for the interactive tests, controlled benchmark sweep, and optimization ablations in the reports. The name follows the local `llama_server_*.sh` launcher convention, but it runs the dedicated `llama-diffusion-cli`; PR #24423 does not provide an OpenAI-compatible diffusion `llama-server` endpoint.
+
+Its defaults match the tested MacBook Pro configuration:
+
+- all model layers on Metal, with 8 CPU threads;
+- Flash Attention, memory mapping, and memory locking enabled;
+- the recommended Entropy-Bound sampler with at most 48 denoising steps and a `0.8` to `0.4` temperature schedule;
+- automatic prompt KV caching and GPU-resident diffusion sampling;
+- thinking enabled through the `<|think|>` system prompt;
+- conversation mode, a 2048-token ceiling, and live diffusion-canvas visualization.
+
+The default binary and model locations reflect the test machine:
+
+```text
+~/llama.cpp/contrib/diffusion-llama.cpp/build-macbook2-metal/bin/llama-diffusion-cli
+~/llama.cpp/models/diffusiongemma-26B-A4B-it-Q8_0.gguf
+```
+
+Set `DIFFUSION_BIN` and `MODEL_FILE` to use other locations. `N_PREDICT`, `SYSTEM_PROMPT`, `DIFFUSION_VISUAL`, and `PROMPT` also override the corresponding defaults. Additional command-line arguments are passed directly to `llama-diffusion-cli` after the launcher defaults.
+
+Interactive use:
+
+```bash
+./llama_server_diffusiongemma-26b-a4b_macbook2.sh
+```
+
+The controlled full-budget sweep disabled conversation and visualization, fixed seed 123, and used a long prompt so the model would consume each requested generation budget:
+
+```bash
+mkdir -p benches/diffusiongemma
+
+for n in 256 512 1024 2048; do
+    /usr/bin/time -l env \
+        PROMPT='Write a continuous, detailed technical tutorial of at least 2500 words explaining how virtual memory, page tables, translation lookaside buffers, memory mapping, page faults, and unified memory interact on modern operating systems. Do not conclude early.' \
+        N_PREDICT="$n" \
+        DIFFUSION_VISUAL=0 \
+        ./llama_server_diffusiongemma-26b-a4b_macbook2.sh \
+            --no-conversation \
+            --seed 123 \
+            --log-colors off \
+        > "benches/diffusiongemma/long-${n}.log" 2>&1
+done
+```
+
+The resulting 256, 512, 1024, and 2048 token runs are the basis of the sustained-throughput table in the benchmark report. The detailed report records the other prompts, visual test, commands, and ablations.
 
 The original upstream README follows.
 
