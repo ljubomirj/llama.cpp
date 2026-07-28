@@ -123,8 +123,16 @@ class LoraTorchTensor:
         assert len(self._lora_A.shape) == len(self._lora_B.shape)
         return (*self._lora_B.shape[:-1], self._lora_A.shape[-1])
 
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    def dim(self) -> int:
+        return len(self.shape)
+
     def size(self, dim=None):
-        assert dim is None
+        if dim is not None:
+            return self.shape[dim]
         return self.shape
 
     def contiguous(self) -> LoraTorchTensor:
@@ -150,7 +158,28 @@ class LoraTorchTensor:
             new_shape = (*(dim if dim != -1 else n_elems // n_new_elems for dim in new_shape),)
 
         if new_shape[-1] != orig_shape[-1]:
-            raise NotImplementedError  # can't reshape the row size trivially
+            # Last-dim changed: splitting row_size into multiple dims.
+            # This is used by Qwen3.5 V-head reorder (e.g. 2D -> 4D reshape).
+            # A has the row_size as its last dim, so it picks up the trailing dims.
+            # B keeps its original structure; extra dims become 1 for broadcasting.
+            if len(orig_shape) == 2:
+                # A: (rank, row_size) -> (rank, *new_shape[1:])
+                a_extra = new_shape[1:]
+                shape_A = (self._rank, *a_extra)
+                # B: (col_size, rank) -> (col_size, *[1]*len(new_shape[1:-1]), rank)
+                middle_ones = (1,) * (len(new_shape) - 2)
+                shape_B = (new_shape[0], *middle_ones, self._rank)
+            else:
+                # Higher-D: similar logic for A last dim and B first dim
+                a_extra = new_shape[len(orig_shape) - 1:]
+                shape_A = (*self._lora_A.shape[:-1], *a_extra)
+                n_mid = len(new_shape) - len(orig_shape)
+                middle_ones = (1,) * n_mid
+                shape_B = (*new_shape[:len(orig_shape)-1], *middle_ones, self._rank)
+            return LoraTorchTensor(
+                self._lora_A.reshape(shape_A),
+                self._lora_B.reshape(shape_B),
+            )
 
         shape_A = (*(1 for _ in new_shape[:-2]), self._rank, orig_shape[-1])
         shape_B = (*new_shape[:-1], self._rank)
@@ -167,16 +196,20 @@ class LoraTorchTensor:
 
     def permute(self, *dims: int) -> LoraTorchTensor:
         shape = self.shape
-        dims = tuple(dim - len(shape) if dim >= 0 else dim for dim in dims)
-        if dims[-1] == -1:
-            # TODO: support higher dimensional A shapes bigger than 1
-            assert all(dim == 1 for dim in self._lora_A.shape[:-2])
+        ndim = len(shape)
+        dims = tuple(dim - ndim if dim >= 0 else dim for dim in dims)
+        # Case: last weight dim stays last AND A's batch dims are all 1
+        # → only B needs permuting
+        if dims[-1] == ndim - 1 and all(d == 1 for d in self._lora_A.shape[:-2]):
             return LoraTorchTensor(self._lora_A, self._lora_B.permute(*dims))
-        if len(shape) == 2 and dims[-1] == -2 and dims[-2] == -1:
+        # Case: full transpose (swap last 2 dims) for 2D — swap A↔B
+        if ndim == 2 and dims[-1] == ndim - 2 and dims[-2] == ndim - 1:
             return LoraTorchTensor(self._lora_B.permute(*dims), self._lora_A.permute(*dims))
-        else:
-            # TODO: compose the above two
-            raise NotImplementedError
+        # General case: apply same permute to both A and B.
+        return LoraTorchTensor(
+            self._lora_A.permute(*dims),
+            self._lora_B.permute(*dims),
+        )
 
     def transpose(self, dim0: int, dim1: int) -> LoraTorchTensor:
         shape = self.shape
@@ -499,6 +532,33 @@ if __name__ == '__main__':
                     yield (name, cast(torch.Tensor, LoraTorchTensor(tensor.A, tensor.B)))
 
             def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+                # Handle flattened expert LoRA tensors (PEFT with target_parameters)
+                # These have names like "experts.base_layer.weight" or "experts.weight"
+                # with shapes flattened across all experts: (n_experts*rank, dim).
+                if ".mlp.experts." in name and isinstance(data_torch, LoraTorchTensor) and ("experts.base_layer.weight" in name or "experts.weight" in name):
+                    n_e = 256; r = lparams["r"]; hd = 2048; n_ff = 512
+                    if "base_layer" in name:
+                        # gate_up_proj: A=(n_e*r, hd), B=(2*n_ff, n_e*r)
+                        a_3d = data_torch._lora_A.reshape(n_e, r, hd)
+                        b_3d = data_torch._lora_B.reshape(2 * n_ff, n_e, r).permute(1, 0, 2).contiguous()
+                        gate = LoraTorchTensor(a_3d, b_3d[:, :n_ff, :].contiguous())
+                        up   = LoraTorchTensor(a_3d, b_3d[:, n_ff:, :].contiguous())
+                        for suffix, lt in [("gate_exps", gate), ("up_exps", up)]:
+                            gname = f"blk.{bid}.ffn_{suffix}.weight"
+                            la, lb = lt.get_lora_A_B()
+                            yield (gname + ".lora_a", la)
+                            yield (gname + ".lora_b", lb)
+                    else:
+                        # down_proj: A=(n_e*r, n_ff), B=(hd, n_e*r)
+                        a_3d = data_torch._lora_A.reshape(n_e, r, n_ff)
+                        b_3d = data_torch._lora_B.reshape(hd, n_e, r).permute(1, 0, 2).contiguous()
+                        lt = LoraTorchTensor(a_3d, b_3d)
+                        gname = f"blk.{bid}.ffn_down_exps.weight"
+                        la, lb = lt.get_lora_A_B()
+                        yield (gname + ".lora_a", la)
+                        yield (gname + ".lora_b", lb)
+                    return
+
                 dest = list(super().modify_tensors(data_torch, name, bid))
                 # some archs may have the same tensor for lm_head and output (tie word embeddings)
                 # in this case, adapters targeting lm_head will fail when using llama-export-lora

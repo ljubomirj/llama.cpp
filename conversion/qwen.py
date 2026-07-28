@@ -368,6 +368,38 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
     @staticmethod
     def _reorder_v_heads(tensor: Tensor, dim: int, num_k_heads: int, num_v_per_k: int, head_dim: int) -> Tensor:
         """Reorder V heads from grouped (by K head) to tiled order along the given dimension."""
+        # Handle LoraTorchTensor (duck-typed via _lora_A attribute)
+        if hasattr(tensor, '_lora_A'):
+            # Compute the column/row permutation using an index tensor
+            shape = list(tensor.shape)
+            if dim < 0:
+                dim += len(shape)
+            perm_dim_size = shape[dim]
+            import torch
+            idx = torch.arange(perm_dim_size, dtype=torch.long, device=tensor._lora_A.device)
+            # Build a reference tensor with the permutation axis as the only non-singleton
+            ref_shape = [1] * len(shape)
+            ref_shape[dim] = perm_dim_size
+            idx_ref = idx.reshape(*ref_shape).float()
+            # Run the standard reorder on the index
+            reordered = _LinearAttentionVReorderBase._reorder_v_heads_standard(
+                idx_ref, dim, num_k_heads, num_v_per_k, head_dim
+            )
+            perm = reordered.reshape(perm_dim_size).long()
+
+            # Apply permutation: dim=0 → B rows, dim=1 → A columns, dim=-1 → A columns
+            if dim == 0:
+                return tensor.__class__(tensor._lora_A, tensor._lora_B[perm])
+            elif dim == 1 or dim == -1:
+                return tensor.__class__(tensor._lora_A[:, perm], tensor._lora_B)
+            else:
+                raise NotImplementedError(f"V-head reorder dim={dim} not supported for LoRA tensors")
+
+        return _LinearAttentionVReorderBase._reorder_v_heads_standard(tensor, dim, num_k_heads, num_v_per_k, head_dim)
+
+    @staticmethod
+    def _reorder_v_heads_standard(tensor: Tensor, dim: int, num_k_heads: int, num_v_per_k: int, head_dim: int) -> Tensor:
+        """Standard V-head reorder for regular torch Tensors."""
         shape = list(tensor.shape)
         if dim < 0:
             dim += len(shape)
